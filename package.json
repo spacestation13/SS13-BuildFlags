@@ -1,7 +1,7 @@
 {
 	"name": "tgbuildflags",
 	"displayName": "TG Build Flags",
-	"description": "Checkbox picker for tgstation build/debug flags.",
+	"description": "Plugin to select build/debug flags for your TG Repo.",
 	"version": "1.0.0",
 	"publisher": "changemeporfavore",
 	"engines": {

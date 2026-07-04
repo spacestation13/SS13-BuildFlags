@@ -2,7 +2,7 @@
 	"name": "tgbuildflags",
 	"displayName": "TG Build Flags",
 	"description": "Checkbox picker for tgstation build/debug flags.",
-	"version": "0.0.1",
+	"version": "1.0.0",
 	"publisher": "changemeporfavore",
 	"engines": {
 		"vscode": "^1.85.0"

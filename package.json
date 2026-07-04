@@ -1,0 +1,66 @@
+{
+	"name": "tgbuildflags",
+	"displayName": "TG Build Flags",
+	"description": "Checkbox picker for tgstation build/debug flags.",
+	"version": "0.0.1",
+	"publisher": "changemeporfavore",
+	"engines": {
+		"vscode": "^1.85.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"views": {
+			"debug": [
+				{
+					"id": "tgBuildFlags.view",
+					"name": "Build Flags",
+					"type": "webview",
+					"contextualTitle": "Build Flags"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "tgBuildFlags.pick",
+				"title": "Build Flags: Show Panel",
+				"category": "TG Build Flags"
+			},
+			{
+				"command": "tgBuildFlags.clear",
+				"title": "Build Flags: Clear Selection",
+				"category": "TG Build Flags"
+			}
+		],
+		"configuration": {
+			"title": "TG Build Flags",
+			"properties": {
+				"tgBuildFlags.configPath": {
+					"type": "string",
+					"default": "tools/build/build_flags.json",
+					"description": "Workspace-relative path to build_flags.json (the flag/preset source of truth)."
+				},
+				"tgBuildFlags.writeFlagsFile": {
+					"type": "boolean",
+					"default": true,
+					"description": "Also write the current selection to .vscode/.buildflags so it is inspectable outside the extension."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"vscode:prepublish": "npm run compile"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"@types/vscode": "^1.85.0",
+		"typescript": "^5.4.0"
+	}
+}

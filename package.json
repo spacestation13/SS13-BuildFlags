@@ -45,10 +45,10 @@
 					"default": "tools/build/build_flags.json",
 					"description": "Workspace-relative path to build_flags.json (the flag/preset source of truth)."
 				},
-				"tgBuildFlags.writeFlagsFile": {
-					"type": "boolean",
-					"default": true,
-					"description": "Also write the current selection to .vscode/.buildflags so it is inspectable outside the extension."
+				"tgBuildFlags.baseTask": {
+					"type": "string",
+					"default": null,
+					"markdownDescription": "Name of an existing task (from `tasks.json`) to clone with the selected `-D` flags appended. When set, F5 will run that task with flags injected instead of the config's original `preLaunchTask`."
 				}
 			}
 		}

@@ -53,12 +53,109 @@ export function activate(context: vscode.ExtensionContext) {
 			setSelected(context, []);
 			provider.refresh();
 		}),
+		vscode.debug.registerDebugConfigurationProvider('byond', {
+			async resolveDebugConfiguration(_folder, config) {
+				const baseTaskName = getBaseTaskName();
+				if (!baseTaskName || getSelected(context).length === 0) {
+					return config;
+				}
+				if (config.preLaunchTask !== baseTaskName) {
+					return config;
+				}
+				const tasks = await vscode.tasks.fetchTasks();
+				const baseTask = tasks.find((t) => t.name === baseTaskName);
+				if (!baseTask) {
+					vscode.window.showWarningMessage(
+						`TG Build Flags: could not find task "${baseTaskName}"`,
+					);
+					return config;
+				}
+				const flaggedTask = cloneTaskWithFlags(baseTask, context);
+				if (!flaggedTask) {
+					return config;
+				}
+				const execution = await vscode.tasks.executeTask(flaggedTask);
+				const exitCode = await waitForTask(execution);
+				if (exitCode !== 0) {
+					return undefined;
+				}
+				config.preLaunchTask = undefined;
+				return config;
+			},
+		}),
 	);
 
 	updateStatusBar(context);
 }
 
-export function deactivate() {}
+export function deactivate() { }
+
+function getBaseTaskName(): string | undefined {
+	return vscode.workspace
+		.getConfiguration('tgBuildFlags')
+		.get<string>('baseTask');
+}
+
+function cloneTaskWithFlags(
+	baseTask: vscode.Task,
+	context: vscode.ExtensionContext,
+): vscode.Task | undefined {
+	const data = loadFlags();
+	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
+	const defines = getSelected(context)
+		.map((id) => byId.get(id)?.define)
+		.filter((d): d is string => Boolean(d))
+		.map((d) => `-D${d}`);
+
+	if (defines.length === 0) {
+		return undefined;
+	}
+
+	const exec = baseTask.execution;
+	let newExec: vscode.ShellExecution | vscode.ProcessExecution;
+
+	if (exec instanceof vscode.ShellExecution) {
+		if (exec.commandLine) {
+			newExec = new vscode.ShellExecution(
+				`${exec.commandLine} ${defines.join(' ')}`,
+				exec.options,
+			);
+		} else if (exec.command) {
+			const args = [...(exec.args ?? []), ...defines];
+			newExec = new vscode.ShellExecution(exec.command, args, exec.options);
+		} else {
+			return undefined;
+		}
+	} else if (exec instanceof vscode.ProcessExecution) {
+		const args = [...exec.args, ...defines];
+		newExec = new vscode.ProcessExecution(exec.process, args, exec.options);
+	} else {
+		return undefined;
+	}
+
+	const task = new vscode.Task(
+		baseTask.definition,
+		baseTask.scope ?? vscode.TaskScope.Workspace,
+		`${baseTask.name} (flagged)`,
+		baseTask.source,
+		newExec,
+		baseTask.problemMatchers,
+	);
+	task.group = baseTask.group;
+	task.presentationOptions = baseTask.presentationOptions;
+	return task;
+}
+
+function waitForTask(execution: vscode.TaskExecution): Promise<number | undefined> {
+	return new Promise((resolve) => {
+		const disposable = vscode.tasks.onDidEndTaskProcess((e) => {
+			if (e.execution === execution) {
+				disposable.dispose();
+				resolve(e.exitCode);
+			}
+		});
+	});
+}
 
 ///Load some configs babyyy
 
@@ -105,7 +202,6 @@ function setSelected(context: vscode.ExtensionContext, ids: string[]) {
 		: ids.filter((id) => known.has(id));
 	context.workspaceState.update(STATE_KEY, cleaned);
 	updateStatusBar(context);
-	maybeWriteFlagsFile(cleaned);
 }
 
 function currentDefines(context: vscode.ExtensionContext): string {
@@ -119,31 +215,6 @@ function currentDefines(context: vscode.ExtensionContext): string {
 		.filter((d): d is string => Boolean(d))
 		.map((d) => `-D${d}`)
 		.join(' ');
-}
-
-function maybeWriteFlagsFile(ids: string[]) {
-	const write = vscode.workspace
-		.getConfiguration('tgBuildFlags')
-		.get<boolean>('writeFlagsFile', true);
-	const root = workspaceRoot();
-	if (!write || !root) {
-		return;
-	}
-	const data = loadFlags();
-	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
-	const defines = ids
-		.map((id) => byId.get(id)?.define)
-		.filter(Boolean)
-		.join('\n');
-	try {
-		fs.mkdirSync(path.join(root, '.vscode'), { recursive: true });
-		fs.writeFileSync(
-			path.join(root, '.vscode', '.buildflags'),
-			defines ? `${defines}\n` : '',
-		);
-	} catch {
-		//:^)
-	}
 }
 
 function updateStatusBar(context: vscode.ExtensionContext) {

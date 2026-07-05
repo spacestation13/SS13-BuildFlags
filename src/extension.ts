@@ -26,6 +26,8 @@ interface Preset {
 	id: string;
 	label: string;
 	flags: string[];
+	/** Values for 'select' flags this preset should set, keyed by flag id. */
+	values?: Record<string, string>;
 }
 interface FlagsFile {
 	categories?: string[];
@@ -547,6 +549,7 @@ function renderPresets() {
 		const p = DATA.presets.find(x => x.id === sel.value);
 		if (p) {
 			selected = new Set(p.flags);
+			values = { ...(p.values || {}) };
 			render();
 			save();
 		}
@@ -585,8 +588,17 @@ function toggle(id, on) {
 
 function syncPresetDropdown() {
 	const sel = document.getElementById('preset');
-	const match = DATA.presets.find(p =>
-		p.flags.length === selected.size && p.flags.every(f => selected.has(f)));
+	const match = DATA.presets.find(p => {
+		if (p.flags.length !== selected.size || !p.flags.every(f => selected.has(f))) {
+			return false;
+		}
+		const presetValues = p.values || {};
+		const activeValueIds = Object.keys(values).filter(id => values[id]);
+		if (activeValueIds.length !== Object.keys(presetValues).length) {
+			return false;
+		}
+		return activeValueIds.every(id => values[id] === presetValues[id]);
+	});
 	sel.value = match ? match.id : '';
 }
 

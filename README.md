@@ -19,12 +19,7 @@ A VS Code extension to add a checkbox picker for build/debug flags. The flag lis
   - `cli-args` (default): clones the base task with `-D${define}` appended to
     its command/args — matches DreamMaker's own CLI define syntax.
   - `write-file`: writes the selected `#define`s into
-    `tgBuildFlags.localDefinesPath`, then runs the base task unmodified. Use
-    this when the target build system has no CLI define flag at all (e.g. raw
-      `dm.exe`, which only takes a `.dme` path). Only a marked block inside that
-      file is ever touched, so any other hand-written content in it survives.
-    With 0 flags selected, or if `tgBuildFlags.baseTask` isn't set/doesn't
-    match, the extension gets out of the way entirely (extension-free parity).
+    `tgBuildFlags.localDefinesPath`, then runs the base task unmodified.
 
 ## Settings
 

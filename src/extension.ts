@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 /** Shape of tools/build/build_flags.json. */
+interface FlagOption {
+	value: string;
+	label: string;
+}
 interface Flag {
 	id: string;
 	define: string;
@@ -11,6 +15,12 @@ interface Flag {
 	description?: string;
 	requires?: string[];
 	conflictsWith?: string[];
+	/** 'boolean' (default) is a plain -D/#define toggle. 'select' carries a value. */
+	type?: 'boolean' | 'select';
+	/** Required when type is 'select'. First option's value should usually be '' (unset). */
+	options?: FlagOption[];
+	/** For 'select' flags: 'quoted' emits define="value" (e.g. a DM string literal define). */
+	valueFormat?: 'raw' | 'quoted';
 }
 interface Preset {
 	id: string;
@@ -24,6 +34,7 @@ interface FlagsFile {
 }
 
 const STATE_KEY = 'tgBuildFlags.selected';
+const STATE_KEY_VALUES = 'tgBuildFlags.values';
 const VIEW_ID = 'tgBuildFlags.view';
 
 let statusBar: vscode.StatusBarItem;
@@ -51,6 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
 		),
 		vscode.commands.registerCommand('tgBuildFlags.clear', () => {
 			setSelected(context, []);
+			setValues(context, {});
 			provider.refresh();
 		}),
 		vscode.debug.registerDebugConfigurationProvider('byond', {
@@ -77,7 +89,8 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 
 				// cli-args mode
-				if (getSelected(context).length === 0) {
+				const hasValues = Object.values(getValues(context)).some((v) => v !== '');
+				if (getSelected(context).length === 0 && !hasValues) {
 					return config;
 				}
 				const tasks = await vscode.tasks.fetchTasks();
@@ -134,16 +147,39 @@ async function runTaskByName(baseTaskName: string): Promise<number | undefined> 
 	return waitForTask(execution);
 }
 
+/** Builds the raw define tokens (without the -D/#define prefix) for all active flags. */
+function activeDefineTokens(context: vscode.ExtensionContext): string[] {
+	const data = loadFlags();
+	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
+	const tokens: string[] = [];
+
+	for (const id of getSelected(context)) {
+		const f = byId.get(id);
+		if (f && f.type !== 'select') {
+			tokens.push(f.define);
+		}
+	}
+
+	const values = getValues(context);
+	for (const f of data?.flags ?? []) {
+		if (f.type !== 'select') {
+			continue;
+		}
+		const value = values[f.id];
+		if (!value) {
+			continue;
+		}
+		tokens.push(f.valueFormat === 'quoted' ? `${f.define}="${value}"` : `${f.define}=${value}`);
+	}
+
+	return tokens;
+}
+
 function cloneTaskWithFlags(
 	baseTask: vscode.Task,
 	context: vscode.ExtensionContext,
 ): vscode.Task | undefined {
-	const data = loadFlags();
-	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
-	const defines = getSelected(context)
-		.map((id) => byId.get(id)?.define)
-		.filter((d): d is string => Boolean(d))
-		.map((d) => `-D${d}`);
+	const defines = activeDefineTokens(context).map((d) => `-D${d}`);
 
 	if (defines.length === 0) {
 		return undefined;
@@ -253,31 +289,37 @@ function setSelected(context: vscode.ExtensionContext, ids: string[]) {
 	updateStatusBar(context);
 }
 
-/** Overwrites localDefinesPath with #defines for the currently selected flags (write-file mode). */
+function getValues(context: vscode.ExtensionContext): Record<string, string> {
+	return context.workspaceState.get<Record<string, string>>(STATE_KEY_VALUES, {});
+}
+
+function setValues(context: vscode.ExtensionContext, values: Record<string, string>) {
+	// Keep only ids that still exist as select flags in the flags file.
+	const data = loadFlags();
+	const known = new Set(data?.flags.filter((f) => f.type === 'select').map((f) => f.id));
+	const cleaned: Record<string, string> = {};
+	for (const [id, value] of Object.entries(values)) {
+		if (known.has(id)) {
+			cleaned[id] = value;
+		}
+	}
+	context.workspaceState.update(STATE_KEY_VALUES, cleaned);
+	updateStatusBar(context);
+}
+
+/** Overwrites localDefinesPath with #defines for the currently active flags (write-file mode). */
 function writeLocalDefines(context: vscode.ExtensionContext): void {
 	const file = localDefinesFilePath();
 	if (!file) {
 		return;
 	}
-	const data = loadFlags();
-	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
-	const defineLines = getSelected(context)
-		.map((id) => byId.get(id)?.define)
-		.filter((d): d is string => Boolean(d))
-		.map((d) => `#define ${d}`);
+	const defineLines = activeDefineTokens(context).map((d) => `#define ${d}`);
 
 	fs.writeFileSync(file, defineLines.length ? `${defineLines.join('\n')}\n` : '');
 }
 
 function currentDefines(context: vscode.ExtensionContext): string {
-	const data = loadFlags();
-	if (!data) {
-		return '';
-	}
-	const byId = new Map(data.flags.map((f) => [f.id, f]));
-	return getSelected(context)
-		.map((id) => byId.get(id)?.define)
-		.filter((d): d is string => Boolean(d))
+	return activeDefineTokens(context)
 		.map((d) => `-D${d}`)
 		.join(' ');
 }
@@ -290,17 +332,34 @@ function updateStatusBar(context: vscode.ExtensionContext) {
 	const data = loadFlags();
 	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
 	const ids = getSelected(context);
-	if (ids.length === 0) {
+	const values = getValues(context);
+	const valueLabels = Object.entries(values)
+		.filter(([, v]) => v !== '')
+		.map(([id, v]) => {
+			const f = byId.get(id);
+			const option = f?.options?.find((o) => o.value === v);
+			return `${f?.label ?? id}: ${option?.label ?? v}`;
+		});
+	const names = [
+		...ids.map((id) => byId.get(id)?.label ?? id),
+		...valueLabels,
+	];
+	if (names.length === 0) {
 		statusBar.text = '$(flame) Flags: none';
 	} else {
-		const first = byId.get(ids[0])?.label ?? ids[0];
 		statusBar.text =
-			ids.length === 1
-				? `$(flame) ${first}`
-				: `$(flame) ${first} +${ids.length - 1}`;
+			names.length === 1
+				? `$(flame) ${names[0]}`
+				: `$(flame) ${names[0]} +${names.length - 1}`;
 	}
-	statusBar.tooltip = ids.length
-		? `Build flags: ${ids.map((id) => byId.get(id)?.define ?? id).join(', ')}\nClick to open the Build Flags view`
+	const tokens = [
+		...ids.map((id) => byId.get(id)?.define ?? id),
+		...Object.entries(values)
+			.filter(([, v]) => v !== '')
+			.map(([id, v]) => `${byId.get(id)?.define ?? id}=${v}`),
+	];
+	statusBar.tooltip = tokens.length
+		? `Build flags: ${tokens.join(', ')}\nClick to open the Build Flags view`
 		: 'No build flags selected. Click to open the Build Flags view';
 	statusBar.show();
 }
@@ -327,6 +386,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			} else if (msg?.type === 'select') {
 				// Autosaves on every toggle/preset pick
 				setSelected(this.context, msg.flags ?? []);
+				setValues(this.context, msg.values ?? {});
 			}
 		});
 		webviewView.webview.html = getHtml(webviewView.webview);
@@ -350,6 +410,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			type: 'init',
 			data,
 			selected: getSelected(this.context),
+			values: getValues(this.context),
 			mode: getInjectionMode(),
 		});
 	}
@@ -432,9 +493,13 @@ const WEBVIEW_STYLE = `
 		cursor: pointer;
 	}
 	label.flag input { margin-top: 3px; flex-shrink: 0; }
-	.flag .meta { display: flex; flex-direction: column; min-width: 0; }
+	.flag .meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 	.flag .name { font-weight: 600; }
 	.flag .desc { opacity: 0.7; font-size: 0.9em; }
+	.flag select.value-select {
+		margin-top: 4px;
+		max-width: 100%;
+	}
 	.warn {
 		color: var(--vscode-editorWarning-foreground);
 		font-size: 0.85em;
@@ -450,6 +515,7 @@ const WEBVIEW_SCRIPT =  `
 const vscode = acquireVsCodeApi();
 let DATA = { flags: [], presets: [], categories: [] };
 let selected = new Set();
+let values = {};
 let MODE = 'cli-args';
 
 window.addEventListener('message', (e) => {
@@ -457,6 +523,7 @@ window.addEventListener('message', (e) => {
 	if (msg.type === 'init') {
 		DATA = msg.data;
 		selected = new Set(msg.selected || []);
+		values = { ...(msg.values || {}) };
 		MODE = msg.mode || 'cli-args';
 		renderPresets();
 		render();
@@ -487,7 +554,13 @@ function renderPresets() {
 }
 
 function save() {
-	vscode.postMessage({ type: 'select', flags: [...selected] });
+	vscode.postMessage({ type: 'select', flags: [...selected], values });
+}
+
+function setValue(id, value) {
+	values[id] = value;
+	render();
+	save();
 }
 
 function toggle(id, on) {
@@ -536,15 +609,43 @@ function render() {
 		for (const f of flags) {
 			const label = document.createElement('label');
 			label.className = 'flag';
-			const cb = document.createElement('input');
-			cb.type = 'checkbox';
-			cb.checked = selected.has(f.id);
-			cb.addEventListener('change', () => toggle(f.id, cb.checked));
 			const meta = document.createElement('div');
 			meta.className = 'meta';
 			const name = document.createElement('span');
 			name.className = 'name';
 			const prefix = MODE === 'write-file' ? '#define ' : '-D';
+
+			if (f.type === 'select') {
+				name.textContent = f.label;
+				meta.appendChild(name);
+				if (f.description) {
+					const d = document.createElement('span');
+					d.className = 'desc';
+					d.textContent = f.description;
+					meta.appendChild(d);
+				}
+				const sel = document.createElement('select');
+				sel.className = 'value-select';
+				for (const opt of (f.options || [])) {
+					const o = document.createElement('option');
+					o.value = opt.value;
+					o.textContent = opt.value
+						? opt.label + '  (' + prefix + f.define + '=' + opt.value + ')'
+						: opt.label;
+					sel.appendChild(o);
+				}
+				sel.value = values[f.id] || '';
+				sel.addEventListener('change', () => setValue(f.id, sel.value));
+				meta.appendChild(sel);
+				label.appendChild(meta);
+				div.appendChild(label);
+				continue;
+			}
+
+			const cb = document.createElement('input');
+			cb.type = 'checkbox';
+			cb.checked = selected.has(f.id);
+			cb.addEventListener('change', () => toggle(f.id, cb.checked));
 			name.textContent = f.label + '  (' + prefix + f.define + ')';
 			meta.appendChild(name);
 			if (f.description) {
@@ -567,13 +668,16 @@ function render() {
 		}
 		container.appendChild(div);
 	}
+	const activeValues = Object.values(values).filter(v => v).length;
+	const count = selected.size + activeValues;
 	document.getElementById('count').textContent =
-		selected.size + ' flag' + (selected.size === 1 ? '' : 's') + ' selected';
+		count + ' flag' + (count === 1 ? '' : 's') + ' selected';
 	syncPresetDropdown();
 }
 
 document.getElementById('clear').addEventListener('click', () => {
 	selected = new Set();
+	values = {};
 	render();
 	save();
 });

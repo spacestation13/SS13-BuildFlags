@@ -19,12 +19,16 @@ interface Flag {
 	conflictsWith?: string[];
 	/** For boolean flags: select flag ids this flag forces to a specific value when turned on, keyed by select flag id. */
 	requiresValues?: Record<string, string>;
-	/** 'boolean' (default) is a plain -D/#define toggle. 'select' carries a value. */
-	type?: 'boolean' | 'select';
+	/** 'boolean' (default) is a plain -D/#define toggle. 'select' carries a value from a dropdown. 'text' carries a free-typed value. */
+	type?: 'boolean' | 'select' | 'text';
 	/** Required when type is 'select'. First option's value should usually be '' (unset). */
 	options?: FlagOption[];
-	/** For 'select' flags: 'quoted' emits define="value" (e.g. a DM string literal define). */
+	/** For 'select'/'text' flags: 'quoted' emits define="value" (e.g. a DM string literal define). */
 	valueFormat?: 'raw' | 'quoted';
+	/** For 'select' flags: when true, an option's value IS the whole -D/#define token (e.g. a full macro name like MAP_OVERRIDE_DEVTEST) instead of a value assigned to `define`. `define` is then unused for token generation. */
+	valueIsDefine?: boolean;
+	/** For 'text' flags: value used when the flag is enabled but the field is left empty. Also shown as the input placeholder. */
+	default?: string;
 }
 interface Preset {
 	id: string;
@@ -41,6 +45,8 @@ interface FlagsFile {
 
 const STATE_KEY = 'tgBuildFlags.selected';
 const STATE_KEY_VALUES = 'tgBuildFlags.values';
+/** For 'text' flags: whether the typed value is currently active, independent of the text itself. */
+const STATE_KEY_ENABLED = 'tgBuildFlags.enabled';
 const VIEW_ID = 'tgBuildFlags.view';
 
 let statusBar: vscode.StatusBarItem;
@@ -69,6 +75,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('tgBuildFlags.clear', () => {
 			setSelected(context, []);
 			setValues(context, {});
+			setEnabled(context, {});
 			provider.refresh();
 		}),
 		vscode.debug.registerDebugConfigurationProvider('byond', {
@@ -153,6 +160,38 @@ async function runTaskByName(baseTaskName: string): Promise<number | undefined> 
 	return waitForTask(execution);
 }
 
+/** 'select' and 'text' flags carry a typed-in-JSON value instead of being plain on/off toggles. */
+function isValueFlag(f: Flag): boolean {
+	return f.type === 'select' || f.type === 'text';
+}
+
+/**
+ * Values for select/text flags that are actually in effect: non-empty, and
+ * (for 'text' flags) not unchecked via their enable checkbox. The typed text
+ * for a disabled 'text' flag is kept in workspaceState so re-checking it
+ * doesn't require retyping, but it's excluded here.
+ */
+function activeValues(context: vscode.ExtensionContext): Record<string, string> {
+	const data = loadFlags();
+	const values = getValues(context);
+	const enabled = getEnabled(context);
+	const result: Record<string, string> = {};
+	for (const f of data?.flags ?? []) {
+		if (!isValueFlag(f)) {
+			continue;
+		}
+		if (f.type === 'text' && enabled[f.id] === false) {
+			continue;
+		}
+		const value = values[f.id] || (f.type === 'text' ? f.default : undefined);
+		if (!value) {
+			continue;
+		}
+		result[f.id] = value;
+	}
+	return result;
+}
+
 /** Builds the raw define tokens (without the -D/#define prefix) for all active flags. */
 function activeDefineTokens(context: vscode.ExtensionContext): string[] {
 	const data = loadFlags();
@@ -161,18 +200,18 @@ function activeDefineTokens(context: vscode.ExtensionContext): string[] {
 
 	for (const id of getSelected(context)) {
 		const f = byId.get(id);
-		if (f && f.type !== 'select') {
+		if (f && !isValueFlag(f)) {
 			tokens.push(f.define);
 		}
 	}
 
-	const values = getValues(context);
-	for (const f of data?.flags ?? []) {
-		if (f.type !== 'select') {
+	for (const [id, value] of Object.entries(activeValues(context))) {
+		const f = byId.get(id);
+		if (!f) {
 			continue;
 		}
-		const value = values[f.id];
-		if (!value) {
+		if (f.valueIsDefine) {
+			tokens.push(value);
 			continue;
 		}
 		tokens.push(f.valueFormat === 'quoted' ? `${f.define}="${value}"` : `${f.define}=${value}`);
@@ -265,6 +304,20 @@ function localDefinesFilePath(): string | undefined {
 	return path.join(root, rel);
 }
 
+/** Opens a workspace-relative file path referenced in a flag's description. */
+async function openWorkspaceFile(rel: string): Promise<void> {
+	const root = workspaceRoot();
+	if (!root || typeof rel !== 'string') {
+		return;
+	}
+	const full = path.join(root, rel);
+	if (!fs.existsSync(full)) {
+		vscode.window.showWarningMessage(`TG Build Flags: could not find file "${rel}"`);
+		return;
+	}
+	await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(full));
+}
+
 function loadFlags(): FlagsFile | undefined {
 	const file = flagsFilePath();
 	if (!file || !fs.existsSync(file)) {
@@ -300,9 +353,9 @@ function getValues(context: vscode.ExtensionContext): Record<string, string> {
 }
 
 function setValues(context: vscode.ExtensionContext, values: Record<string, string>) {
-	// Keep only ids that still exist as select flags in the flags file.
+	// Keep only ids that still exist as select/text flags in the flags file.
 	const data = loadFlags();
-	const known = new Set(data?.flags.filter((f) => f.type === 'select').map((f) => f.id));
+	const known = new Set(data?.flags.filter(isValueFlag).map((f) => f.id));
 	const cleaned: Record<string, string> = {};
 	for (const [id, value] of Object.entries(values)) {
 		if (known.has(id)) {
@@ -310,6 +363,24 @@ function setValues(context: vscode.ExtensionContext, values: Record<string, stri
 		}
 	}
 	context.workspaceState.update(STATE_KEY_VALUES, cleaned);
+	updateStatusBar(context);
+}
+
+function getEnabled(context: vscode.ExtensionContext): Record<string, boolean> {
+	return context.workspaceState.get<Record<string, boolean>>(STATE_KEY_ENABLED, {});
+}
+
+function setEnabled(context: vscode.ExtensionContext, enabled: Record<string, boolean>) {
+	// Keep only ids that still exist as 'text' flags in the flags file.
+	const data = loadFlags();
+	const known = new Set(data?.flags.filter((f) => f.type === 'text').map((f) => f.id));
+	const cleaned: Record<string, boolean> = {};
+	for (const [id, value] of Object.entries(enabled)) {
+		if (known.has(id)) {
+			cleaned[id] = value;
+		}
+	}
+	context.workspaceState.update(STATE_KEY_ENABLED, cleaned);
 	updateStatusBar(context);
 }
 
@@ -338,9 +409,8 @@ function updateStatusBar(context: vscode.ExtensionContext) {
 	const data = loadFlags();
 	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
 	const ids = getSelected(context);
-	const values = getValues(context);
+	const values = activeValues(context);
 	const valueLabels = Object.entries(values)
-		.filter(([, v]) => v !== '')
 		.map(([id, v]) => {
 			const f = byId.get(id);
 			const option = f?.options?.find((o) => o.value === v);
@@ -360,9 +430,10 @@ function updateStatusBar(context: vscode.ExtensionContext) {
 	}
 	const tokens = [
 		...ids.map((id) => byId.get(id)?.define ?? id),
-		...Object.entries(values)
-			.filter(([, v]) => v !== '')
-			.map(([id, v]) => `${byId.get(id)?.define ?? id}=${v}`),
+		...Object.entries(values).map(([id, v]) => {
+			const f = byId.get(id);
+			return f?.valueIsDefine ? v : `${f?.define ?? id}=${v}`;
+		}),
 	];
 	statusBar.tooltip = tokens.length
 		? `Build flags: ${tokens.join(', ')}\nClick to open the Build Flags view`
@@ -393,6 +464,9 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 				// Autosaves on every toggle/preset pick
 				setSelected(this.context, msg.flags ?? []);
 				setValues(this.context, msg.values ?? {});
+				setEnabled(this.context, msg.enabled ?? {});
+			} else if (msg?.type === 'openFile') {
+				openWorkspaceFile(msg.path);
 			}
 		});
 		webviewView.webview.html = getHtml(webviewView.webview);
@@ -417,7 +491,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			data,
 			selected: getSelected(this.context),
 			values: getValues(this.context),
-			mode: getInjectionMode(),
+			enabled: getEnabled(this.context),
 		});
 	}
 }
@@ -502,9 +576,32 @@ const WEBVIEW_STYLE = `
 	.flag .meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 	.flag .name { font-weight: 600; }
 	.flag .desc { opacity: 0.7; font-size: 0.9em; }
+	.flag .desc a.file-ref {
+		color: var(--vscode-textLink-foreground);
+		text-decoration: none;
+	}
+	.flag .desc a.file-ref:hover { text-decoration: underline; }
 	.flag select.value-select {
 		margin-top: 4px;
 		max-width: 100%;
+	}
+	.flag input.value-input {
+		margin-top: 4px;
+		width: 100%;
+		max-width: 100%;
+		box-sizing: border-box;
+		flex-shrink: 1;
+		font-family: inherit;
+		font-size: inherit;
+		color: var(--vscode-input-foreground);
+		background: var(--vscode-input-background);
+		border: 1px solid var(--vscode-input-border, transparent);
+		border-radius: 2px;
+		padding: 3px 6px;
+	}
+	.flag input.value-input:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
 	}
 	.warn {
 		color: var(--vscode-editorWarning-foreground);
@@ -522,7 +619,13 @@ const vscode = acquireVsCodeApi();
 let DATA = { flags: [], presets: [], categories: [] };
 let selected = new Set();
 let values = {};
+/** For 'text' flags: id -> whether its typed value is active. Missing = enabled. */
+let enabled = {};
 let MODE = 'cli-args';
+
+function isTextEnabled(id) {
+	return enabled[id] !== false;
+}
 
 window.addEventListener('message', (e) => {
 	const msg = e.data;
@@ -530,6 +633,7 @@ window.addEventListener('message', (e) => {
 		DATA = msg.data;
 		selected = new Set(msg.selected || []);
 		values = { ...(msg.values || {}) };
+		enabled = { ...(msg.enabled || {}) };
 		MODE = msg.mode || 'cli-args';
 		renderPresets();
 		render();
@@ -538,6 +642,35 @@ window.addEventListener('message', (e) => {
 
 function byId(id) {
 	return DATA.flags.find(f => f.id === id);
+}
+
+// Matches workspace-relative file paths (forward- or backslash-separated, e.g. Windows-style).
+const FILE_REF_RE = /(?:[\\w-]+[\\\\/])*[\\w.-]+\\.(?:dm|dme|json|md|txt)\\b/g;
+
+function renderDescription(container, text) {
+	FILE_REF_RE.lastIndex = 0;
+	let last = 0;
+	let m;
+	while ((m = FILE_REF_RE.exec(text))) {
+		if (m.index > last) {
+			container.appendChild(document.createTextNode(text.slice(last, m.index)));
+		}
+		const ref = m[0];
+		const a = document.createElement('a');
+		a.className = 'file-ref';
+		a.textContent = ref;
+		a.title = 'Open ' + ref;
+		a.href = '#';
+		a.addEventListener('click', (e) => {
+			e.preventDefault();
+			vscode.postMessage({ type: 'openFile', path: ref });
+		});
+		container.appendChild(a);
+		last = m.index + m[0].length;
+	}
+	if (last < text.length) {
+		container.appendChild(document.createTextNode(text.slice(last)));
+	}
 }
 
 function renderPresets() {
@@ -554,6 +687,8 @@ function renderPresets() {
 		if (p) {
 			selected = new Set(p.flags);
 			values = { ...(p.values || {}) };
+			// A preset's explicit values should take effect, not stay hidden behind a stale checkbox.
+			enabled = {};
 			render();
 			save();
 		}
@@ -561,7 +696,7 @@ function renderPresets() {
 }
 
 function save() {
-	vscode.postMessage({ type: 'select', flags: [...selected], values });
+	vscode.postMessage({ type: 'select', flags: [...selected], values, enabled });
 }
 
 function setValue(id, value) {
@@ -581,6 +716,22 @@ function setValue(id, value) {
 	save();
 }
 
+function isActiveValue(id) {
+	const f = byId(id);
+	if (f && f.type === 'text' && !isTextEnabled(id)) {
+		return false;
+	}
+	const v = values[id] || (f && f.type === 'text' ? f.default : undefined);
+	return !!v;
+}
+
+function updateCount() {
+	const activeValues = Object.keys(values).filter(isActiveValue).length;
+	const count = selected.size + activeValues;
+	document.getElementById('count').textContent =
+		count + ' flag' + (count === 1 ? '' : 's') + ' selected';
+}
+
 function toggle(id, on) {
 	if (on) {
 		selected.add(id);
@@ -589,6 +740,7 @@ function toggle(id, on) {
 		}
 		for (const [selId, val] of Object.entries(byId(id).requiresValues || {})) {
 			values[selId] = val;
+			enabled[selId] = true;
 		}
 	} else {
 		selected.delete(id);
@@ -618,7 +770,7 @@ function syncPresetDropdown() {
 			return false;
 		}
 		const presetValues = p.values || {};
-		const activeValueIds = Object.keys(values).filter(id => values[id]);
+		const activeValueIds = Object.keys(values).filter(isActiveValue);
 		if (activeValueIds.length !== Object.keys(presetValues).length) {
 			return false;
 		}
@@ -650,7 +802,6 @@ function render() {
 			meta.className = 'meta';
 			const name = document.createElement('span');
 			name.className = 'name';
-			const prefix = MODE === 'write-file' ? '#define ' : '-D';
 
 			if (f.type === 'select') {
 				name.textContent = f.label;
@@ -658,7 +809,7 @@ function render() {
 				if (f.description) {
 					const d = document.createElement('span');
 					d.className = 'desc';
-					d.textContent = f.description;
+					renderDescription(d, f.description);
 					meta.appendChild(d);
 				}
 				const sel = document.createElement('select');
@@ -666,8 +817,9 @@ function render() {
 				for (const opt of (f.options || [])) {
 					const o = document.createElement('option');
 					o.value = opt.value;
+					const token = f.valueIsDefine ? opt.value : f.define + '=' + opt.value;
 					o.textContent = opt.value
-						? opt.label + '  (' + prefix + f.define + '=' + opt.value + ')'
+						? opt.label + '  (' + prefix + token + ')'
 						: opt.label;
 					sel.appendChild(o);
 				}
@@ -687,6 +839,54 @@ function render() {
 				continue;
 			}
 
+			if (f.type === 'text') {
+				name.textContent = f.label;
+				meta.appendChild(name);
+				if (f.description) {
+					const d = document.createElement('span');
+					d.className = 'desc';
+					renderDescription(d, f.description);
+					meta.appendChild(d);
+				}
+				const input = document.createElement('input');
+				input.type = 'text';
+				input.className = 'value-input';
+				input.placeholder = f.default
+					? f.default + '  (' + prefix + f.define + '=' + (f.valueFormat === 'quoted' ? '"' + f.default + '"' : f.default) + ')'
+					: prefix + f.define + '=...';
+				input.value = values[f.id] || '';
+				input.disabled = !isTextEnabled(f.id);
+				let saveTimer;
+				input.addEventListener('input', () => {
+					values[f.id] = input.value;
+					updateCount();
+					clearTimeout(saveTimer);
+					saveTimer = setTimeout(() => { syncPresetDropdown(); save(); }, 400);
+				});
+				input.addEventListener('blur', () => {
+					clearTimeout(saveTimer);
+					syncPresetDropdown();
+					save();
+				});
+				meta.appendChild(input);
+
+				const cb = document.createElement('input');
+				cb.type = 'checkbox';
+				cb.checked = isTextEnabled(f.id);
+				cb.title = 'Enable/disable this value without clearing it';
+				cb.addEventListener('change', () => {
+					enabled[f.id] = cb.checked;
+					input.disabled = !cb.checked;
+					updateCount();
+					syncPresetDropdown();
+					save();
+				});
+				label.appendChild(cb);
+				label.appendChild(meta);
+				div.appendChild(label);
+				continue;
+			}
+
 			const cb = document.createElement('input');
 			cb.type = 'checkbox';
 			cb.checked = selected.has(f.id);
@@ -696,7 +896,7 @@ function render() {
 			if (f.description) {
 				const d = document.createElement('span');
 				d.className = 'desc';
-				d.textContent = f.description;
+				renderDescription(d, f.description);
 				meta.appendChild(d);
 			}
 			label.appendChild(cb);
@@ -713,16 +913,14 @@ function render() {
 		}
 		container.appendChild(div);
 	}
-	const activeValues = Object.values(values).filter(v => v).length;
-	const count = selected.size + activeValues;
-	document.getElementById('count').textContent =
-		count + ' flag' + (count === 1 ? '' : 's') + ' selected';
+	updateCount();
 	syncPresetDropdown();
 }
 
 document.getElementById('clear').addEventListener('click', () => {
 	selected = new Set();
 	values = {};
+	enabled = {};
 	render();
 	save();
 });

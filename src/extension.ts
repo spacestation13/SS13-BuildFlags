@@ -304,8 +304,8 @@ function localDefinesFilePath(): string | undefined {
 	return path.join(root, rel);
 }
 
-/** Opens a workspace-relative file path referenced in a flag's description. */
-async function openWorkspaceFile(rel: string): Promise<void> {
+/** Opens a workspace-relative file path referenced in a flag's description, optionally jumping to a line. */
+async function openWorkspaceFile(rel: string, line?: number): Promise<void> {
 	const root = workspaceRoot();
 	if (!root || typeof rel !== 'string') {
 		return;
@@ -315,7 +315,10 @@ async function openWorkspaceFile(rel: string): Promise<void> {
 		vscode.window.showWarningMessage(`TG Build Flags: could not find file "${rel}"`);
 		return;
 	}
-	await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(full));
+	const options: vscode.TextDocumentShowOptions | undefined = line
+		? { selection: new vscode.Range(line - 1, 0, line - 1, 0) }
+		: undefined;
+	await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(full), options);
 }
 
 function loadFlags(): FlagsFile | undefined {
@@ -466,7 +469,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 				setValues(this.context, msg.values ?? {});
 				setEnabled(this.context, msg.enabled ?? {});
 			} else if (msg?.type === 'openFile') {
-				openWorkspaceFile(msg.path);
+				openWorkspaceFile(msg.path, msg.line);
 			}
 		});
 		webviewView.webview.html = getHtml(webviewView.webview);
@@ -621,7 +624,6 @@ let selected = new Set();
 let values = {};
 /** For 'text' flags: id -> whether its typed value is active. Missing = enabled. */
 let enabled = {};
-let MODE = 'cli-args';
 
 function isTextEnabled(id) {
 	return enabled[id] !== false;
@@ -634,7 +636,6 @@ window.addEventListener('message', (e) => {
 		selected = new Set(msg.selected || []);
 		values = { ...(msg.values || {}) };
 		enabled = { ...(msg.enabled || {}) };
-		MODE = msg.mode || 'cli-args';
 		renderPresets();
 		render();
 	}
@@ -644,8 +645,9 @@ function byId(id) {
 	return DATA.flags.find(f => f.id === id);
 }
 
-// Matches workspace-relative file paths (forward- or backslash-separated, e.g. Windows-style).
-const FILE_REF_RE = /(?:[\\w-]+[\\\\/])*[\\w.-]+\\.(?:dm|dme|json|md|txt)\\b/g;
+// Matches workspace-relative file paths (forward- or backslash-separated, e.g. Windows-style),
+// with an optional trailing :line (e.g. _std/types.dm:32).
+const FILE_REF_RE = /((?:[\\w-]+[\\\\/])*[\\w.-]+\\.(?:dm|dme|json|md|txt))(?::(\\d+))?\\b/g;
 
 function renderDescription(container, text) {
 	FILE_REF_RE.lastIndex = 0;
@@ -656,6 +658,8 @@ function renderDescription(container, text) {
 			container.appendChild(document.createTextNode(text.slice(last, m.index)));
 		}
 		const ref = m[0];
+		const filePath = m[1];
+		const line = m[2] ? parseInt(m[2], 10) : undefined;
 		const a = document.createElement('a');
 		a.className = 'file-ref';
 		a.textContent = ref;
@@ -663,7 +667,7 @@ function renderDescription(container, text) {
 		a.href = '#';
 		a.addEventListener('click', (e) => {
 			e.preventDefault();
-			vscode.postMessage({ type: 'openFile', path: ref });
+			vscode.postMessage({ type: 'openFile', path: filePath, line });
 		});
 		container.appendChild(a);
 		last = m.index + m[0].length;
@@ -817,10 +821,7 @@ function render() {
 				for (const opt of (f.options || [])) {
 					const o = document.createElement('option');
 					o.value = opt.value;
-					const token = f.valueIsDefine ? opt.value : f.define + '=' + opt.value;
-					o.textContent = opt.value
-						? opt.label + '  (' + prefix + token + ')'
-						: opt.label;
+					o.textContent = opt.label;
 					sel.appendChild(o);
 				}
 				sel.value = values[f.id] || '';
@@ -851,9 +852,7 @@ function render() {
 				const input = document.createElement('input');
 				input.type = 'text';
 				input.className = 'value-input';
-				input.placeholder = f.default
-					? f.default + '  (' + prefix + f.define + '=' + (f.valueFormat === 'quoted' ? '"' + f.default + '"' : f.default) + ')'
-					: prefix + f.define + '=...';
+				input.placeholder = f.default || '';
 				input.value = values[f.id] || '';
 				input.disabled = !isTextEnabled(f.id);
 				let saveTimer;
@@ -891,7 +890,7 @@ function render() {
 			cb.type = 'checkbox';
 			cb.checked = selected.has(f.id);
 			cb.addEventListener('change', () => toggle(f.id, cb.checked));
-			name.textContent = f.label + '  (' + prefix + f.define + ')';
+			name.textContent = f.label;
 			meta.appendChild(name);
 			if (f.description) {
 				const d = document.createElement('span');

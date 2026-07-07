@@ -2,7 +2,7 @@
 	"name": "tgbuildflags",
 	"displayName": "TG Build Flags",
 	"description": "Plugin to select build/debug flags for your TG Repo.",
-	"version": "1.1.7",
+	"version": "1.1.9",
 	"publisher": "changemeporfavore",
 	"engines": {
 		"vscode": "^1.85.0"

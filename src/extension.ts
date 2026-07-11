@@ -59,6 +59,8 @@ export function activate(context: vscode.ExtensionContext) {
 	statusBar.command = `${VIEW_ID}.focus`;
 	context.subscriptions.push(statusBar);
 
+	ensureDefineDocWatcher(context);
+
 	const provider = new BuildFlagsViewProvider(context);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(VIEW_ID, provider, {
@@ -339,6 +341,103 @@ function loadFlags(): FlagsFile | undefined {
 	}
 }
 
+// Auto-desc: fall back to a flag's ///-doc-comment above its #define in DM source.
+const DEFINE_DOC_RE = /((?:^[ \t]*\/\/\/.*\n)+)^[ \t]*(?:\/\/[ \t]*)?#define[ \t]+(\w+)/gm;
+
+let defineDocCache: Map<string, string> | undefined;
+let defineDocWatcher: vscode.FileSystemWatcher | undefined;
+
+/** Workspace-relative path to the single DM file scanned for /// doc comments, or undefined when unset. */
+function definesDocFilePath(): string | undefined {
+	const root = workspaceRoot();
+	const rel = vscode.workspace
+		.getConfiguration('ss13BuildFlags')
+		.get<string>('definesDocPath');
+	if (!root || !rel) {
+		return undefined;
+	}
+	return path.join(root, rel);
+}
+
+/** Scans the configured DM file once and maps #define name -> its /// doc comment */
+function buildDefineDocMap(): Map<string, string> {
+	const map = new Map<string, string>();
+	const file = definesDocFilePath();
+	if (!file) {
+		return map;
+	}
+	let text: string;
+	try {
+		text = fs.readFileSync(file, 'utf8');
+	} catch {
+		return map;
+	}
+	DEFINE_DOC_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = DEFINE_DOC_RE.exec(text))) {
+		const name = m[2];
+		if (map.has(name)) {
+			continue;
+		}
+		const doc = m[1]
+			.split('\n')
+			.map((l) => l.replace(/^[ \t]*\/\/\/ ?/, '').trimEnd())
+			.filter((l) => l.length > 0)
+			.join(' ');
+		if (doc) {
+			map.set(name, doc);
+		}
+	}
+	return map;
+}
+
+function getDefineDocMap(): Map<string, string> {
+	if (!defineDocCache) {
+		defineDocCache = buildDefineDocMap();
+	}
+	return defineDocCache;
+}
+
+/** Rebuilds the doc map next time it's needed, e.g. after the configured DM file is edited. */
+function ensureDefineDocWatcher(context: vscode.ExtensionContext): void {
+	if (defineDocWatcher) {
+		return;
+	}
+	const file = definesDocFilePath();
+	if (!file) {
+		return;
+	}
+	defineDocWatcher = vscode.workspace.createFileSystemWatcher(file);
+	const invalidate = () => { defineDocCache = undefined; };
+	context.subscriptions.push(
+		defineDocWatcher,
+		defineDocWatcher.onDidChange(invalidate),
+		defineDocWatcher.onDidCreate(invalidate),
+		defineDocWatcher.onDidDelete(invalidate),
+	);
+}
+
+/** Extracts the bare macro name from a define token, dropping any assigned value (e.g. `NAME=1` -> `NAME`). */
+function defineMacroName(define: string): string {
+	return define.trim().split(/[=\s]/, 1)[0];
+}
+
+/** Fills in flag.description from the DM source's doc comment where build_flags.json left it blank. */
+async function withAutoDescriptions(data: FlagsFile): Promise<FlagsFile> {
+	if (!data.flags.some((f) => !f.description && f.define)) {
+		return data;
+	}
+	const docs = getDefineDocMap();
+	return {
+		...data,
+		flags: data.flags.map((f) =>
+			f.description || !f.define
+				? f
+				: { ...f, description: docs.get(defineMacroName(f.define)) ?? f.description },
+		),
+	};
+}
+
 // Get selected state
 
 function getSelected(context: vscode.ExtensionContext): string[] {
@@ -485,7 +584,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 		this.postInit();
 	}
 
-	private postInit(): void {
+	private async postInit(): Promise<void> {
 		if (!this.view) {
 			return;
 		}
@@ -494,9 +593,13 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			this.view.webview.html = getMissingConfigHtml();
 			return;
 		}
+		const resolved = await withAutoDescriptions(data);
+		if (!this.view) {
+			return;
+		}
 		this.view.webview.postMessage({
 			type: 'init',
-			data,
+			data: resolved,
 			selected: getSelected(this.context),
 			values: getValues(this.context),
 			enabled: getEnabled(this.context),

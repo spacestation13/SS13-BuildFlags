@@ -67,6 +67,11 @@
 					"type": "string",
 					"default": "",
 					"markdownDescription": "Workspace-relative path to a file the selected `#define`s are written into before the build task runs. Only used when `ss13BuildFlags.injectionMode` is `write-file`. Only the extension's own marked block within this file is touched — any other hand-written content is preserved."
+				},
+				"ss13BuildFlags.definesDocPath": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Workspace-relative path to a single DM file scanned for `///` doc comments above `#define`s, used to auto-fill a flag's description when `build_flags.json` leaves it blank. Leave empty to disable auto-descriptions."
 				}
 			}
 		}

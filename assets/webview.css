@@ -1,0 +1,141 @@
+body {
+	font-family: var(--vscode-font-family);
+	font-size: var(--vscode-font-size);
+	padding: 4px 8px 12px;
+	color: var(--vscode-foreground);
+}
+
+.toolbar {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	flex-wrap: wrap;
+	margin-bottom: 10px;
+	position: sticky;
+	top: 0;
+	background: var(--vscode-sideBar-background);
+	padding: 6px 0;
+	z-index: 1;
+}
+
+select,
+button {
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border: none;
+	padding: 3px 8px;
+	border-radius: 3px;
+	cursor: pointer;
+}
+
+select {
+	color: var(--vscode-dropdown-foreground);
+	background: var(--vscode-dropdown-background);
+	border: 1px solid var(--vscode-dropdown-border);
+	flex: 1;
+	min-width: 0;
+}
+
+button:hover {
+	background: var(--vscode-button-hoverBackground);
+}
+
+button.secondary {
+	color: var(--vscode-button-secondaryForeground);
+	background: var(--vscode-button-secondaryBackground);
+}
+
+.category {
+	margin-bottom: 10px;
+	padding: 6px 8px;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 5px;
+	background: color-mix(in srgb, var(--vscode-sideBar-background) 85%, var(--vscode-editor-background) 15%);
+}
+
+.category h2 {
+	font-size: 0.78em;
+	text-transform: uppercase;
+	letter-spacing: 0.07em;
+	opacity: 0.75;
+	margin: 0 0 6px;
+	padding-bottom: 4px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+label.flag {
+	display: flex;
+	gap: 6px;
+	align-items: flex-start;
+	padding: 4px 0;
+	cursor: pointer;
+}
+
+label.flag input {
+	margin-top: 3px;
+	flex-shrink: 0;
+}
+
+.flag .meta {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	flex: 1;
+}
+
+.flag .name {
+	font-weight: 600;
+}
+
+.flag .desc {
+	opacity: 0.7;
+	font-size: 0.9em;
+}
+
+.flag .desc a.file-ref {
+	color: var(--vscode-textLink-foreground);
+	text-decoration: none;
+}
+
+.flag .desc a.file-ref:hover {
+	text-decoration: underline;
+}
+
+.flag select.value-select {
+	margin-top: 4px;
+	max-width: 100%;
+}
+
+.flag input.value-input {
+	margin-top: 4px;
+	width: 100%;
+	max-width: 100%;
+	box-sizing: border-box;
+	flex-shrink: 1;
+	font-family: inherit;
+	font-size: inherit;
+	color: var(--vscode-input-foreground);
+	background: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, transparent);
+	border-radius: 2px;
+	padding: 3px 6px;
+}
+
+.flag input.value-input:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.warn {
+	color: var(--vscode-editorWarning-foreground);
+	font-size: 0.85em;
+	margin: 2px 0 0 22px;
+}
+
+.count {
+	opacity: 0.7;
+	font-size: 0.85em;
+	margin-top: 6px;
+}

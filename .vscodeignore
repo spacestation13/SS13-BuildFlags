@@ -1,5 +1,8 @@
 .gitignore
 tsconfig.json
 src/**
+!assets/**
 **/*.map
 node_modules/**
+.vscode/**
+.github/**

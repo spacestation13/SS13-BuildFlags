@@ -4,8 +4,12 @@
 	"description": "Plugin to select build/debug flags for your SS13 Repo.",
 	"version": "1.0.0",
 	"publisher": "ss13",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/spacestation13/SS13-BuildFlags"
+	},
 	"engines": {
-		"vscode": "^1.85.0"
+		"vscode": "^1.102.0"
 	},
 	"categories": [
 		"Other"
@@ -79,11 +83,18 @@
 	"scripts": {
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./",
-		"vscode:prepublish": "npm run compile"
+		"vscode:prepublish": "npm run compile",
+		"package": "npx @vscode/vsce package",
+		"publish": "npx @vscode/vsce publish"
 	},
 	"devDependencies": {
-		"@types/node": "^20.0.0",
+		"@types/node": "^22.20.1",
 		"@types/vscode": "^1.85.0",
-		"typescript": "^5.4.0"
+		"@vscode/vsce": "^3.9.2",
+		"typescript": "^5.9.3"
+	},
+	"allowScripts": {
+		"@vscode/vsce-sign@2.0.9": true,
+		"keytar@7.9.0": true
 	}
 }

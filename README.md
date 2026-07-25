@@ -38,3 +38,22 @@ npm run compile
 Then press **F5** in this folder to launch an Extension Development Host, open
 the target game repo inside it, and open the **Run and Debug** panel. There
 should be a section for the flags.
+
+## Publish to VS Code Marketplace
+
+This repo includes a GitHub Actions workflow that publishes to the VS Code Marketplace.
+
+### One-time setup
+
+1. Create a Personal Access Token in the Visual Studio Marketplace publisher
+  portal with publish rights for your publisher.
+2. In your GitHub repo settings, add it as an actions secret named
+  `VSCE_PAT`.
+
+### Release flow
+
+1. Bump `version` in `package.json` and push that.
+2. Create and push a tag like `v1.0.1`:
+
+Pushing a `v*` tag triggers publish automatically. You can also run the
+workflow manually from the Actions tab.

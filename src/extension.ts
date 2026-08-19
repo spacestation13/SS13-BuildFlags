@@ -1,8 +1,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { parseJsonc } from './jsonc';
 
-/** Shape of tools/build/build_flags.json. */
+/** Shape of tools/build/build_flags.json or build_flags.jsonc. */
 interface FlagOption {
 	value: string;
 	label: string;
@@ -334,7 +335,7 @@ function loadFlags(): FlagsFile | undefined {
 		return undefined;
 	}
 	try {
-		return JSON.parse(fs.readFileSync(file, 'utf8')) as FlagsFile;
+		return parseJsonc<FlagsFile>(fs.readFileSync(file, 'utf8'));
 	} catch (err) {
 		vscode.window.showErrorMessage(`SS13 Build Flags: failed to parse ${file}: ${err}`);
 		return undefined;
@@ -422,7 +423,7 @@ function defineMacroName(define: string): string {
 	return define.trim().split(/[=\s]/, 1)[0];
 }
 
-/** Fills in flag.description from the DM source's doc comment where build_flags.json left it blank. */
+/** Fills in flag.description from the DM source's doc comment where the flags file left it blank. */
 async function withAutoDescriptions(data: FlagsFile): Promise<FlagsFile> {
 	if (!data.flags.some((f) => !f.description && f.define)) {
 		return data;

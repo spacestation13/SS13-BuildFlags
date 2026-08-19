@@ -2,7 +2,7 @@
 	"name": "ss13buildflags",
 	"displayName": "SS13 Build Flags",
 	"description": "Plugin to select build/debug flags for your SS13 Repo.",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"publisher": "ss13",
 	"repository": {
 		"type": "git",

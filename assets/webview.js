@@ -27,7 +27,7 @@ function byId(id) {
 
 // Matches workspace-relative file paths (forward- or backslash-separated, e.g. Windows-style),
 // with an optional trailing :line (e.g. _std/types.dm:32).
-const FILE_REF_RE = /((?:[\w-]+[\\/])*[\w.-]+\.(?:dm|dme|json|md|txt))(?::(\d+))?\b/g;
+const FILE_REF_RE = /((?:[\w-]+[\\/])*[\w.-]+\.(?:dm|dme|json|jsonc|md|txt))(?::(\d+))?\b/g;
 
 function renderDescription(container, text) {
 	FILE_REF_RE.lastIndex = 0;

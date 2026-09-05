@@ -25,8 +25,8 @@ A VS Code extension to add a checkbox picker for build/debug flags. The flag lis
 
 - `ss13BuildFlags.configPath` — workspace-relative path to the flags JSON.
 - `ss13BuildFlags.baseTask` — exact task name/label to inject flags into.
-- `ss13BuildFlags.injectionMode` — `"cli-args"` or `"write-file"`.
 - `ss13BuildFlags.localDefinesPath` — workspace-relative path for `write-file` mode.
+- `ss13BuildFlags.definesDocPath` — workspace-relative DM file for automatic `///` descriptions, `//#region Category` categories. Close regions with `//#endregion`.
 
 ## Build / run locally
 

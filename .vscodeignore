@@ -4,5 +4,6 @@ src/**
 !assets/**
 **/*.map
 node_modules/**
+!node_modules/jsonc-parser/**
 .vscode/**
 .github/**

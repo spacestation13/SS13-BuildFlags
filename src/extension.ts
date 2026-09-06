@@ -14,7 +14,7 @@ interface Flag {
 	id: string;
 	define: string;
 	label: string;
-	category: string;
+	category?: string;
 	description?: string;
 	requires?: string[];
 	conflictsWith?: string[];
@@ -42,6 +42,14 @@ interface FlagsFile {
 	categories?: string[];
 	flags: Flag[];
 	presets: Preset[];
+}
+interface InputFlag extends Omit<Flag, 'id' | 'define' | 'label'> {
+	id?: string;
+	define?: string;
+	label?: string;
+}
+interface InputFlagsFile extends Omit<FlagsFile, 'flags'> {
+	flags: InputFlag[];
 }
 
 const STATE_KEY = 'ss13BuildFlags.selected';
@@ -179,41 +187,45 @@ function isValueFlag(f: Flag): boolean {
  * for a disabled 'text' flag is kept in workspaceState so re-checking it
  * doesn't require retyping, but it's excluded here.
  */
-function activeValues(context: vscode.ExtensionContext): Record<string, string> {
+function activeValues(
+	context: vscode.ExtensionContext,
+	values = getValues(context),
+	enabled = getEnabled(context),
+): Record<string, string> {
 	const data = loadFlags();
-	const values = getValues(context);
-	const enabled = getEnabled(context);
 	const result: Record<string, string> = {};
 	for (const f of data?.flags ?? []) {
-		if (!isValueFlag(f)) {
-			continue;
-		}
-		if (f.type === 'text' && enabled[f.id] === false) {
+		if (!isValueFlag(f) || (f.type === 'text' && enabled[f.id] === false)) {
 			continue;
 		}
 		const value = values[f.id] || (f.type === 'text' ? f.default : undefined);
-		if (!value) {
-			continue;
+		if (value) {
+			result[f.id] = value;
 		}
-		result[f.id] = value;
 	}
 	return result;
 }
 
 /** Builds the raw define tokens (without the -D/#define prefix) for all active flags. */
-function activeDefineTokens(context: vscode.ExtensionContext): string[] {
+function activeDefineTokens(
+	context: vscode.ExtensionContext,
+	ids = getSelected(context),
+	values = getValues(context),
+	enabled = getEnabled(context),
+	separator: '=' | ' ' = '=',
+): string[] {
 	const data = loadFlags();
 	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
 	const tokens: string[] = [];
 
-	for (const id of getSelected(context)) {
+	for (const id of ids) {
 		const f = byId.get(id);
 		if (f && !isValueFlag(f)) {
 			tokens.push(f.define);
 		}
 	}
 
-	for (const [id, value] of Object.entries(activeValues(context))) {
+	for (const [id, value] of Object.entries(activeValues(context, values, enabled))) {
 		const f = byId.get(id);
 		if (!f) {
 			continue;
@@ -222,7 +234,7 @@ function activeDefineTokens(context: vscode.ExtensionContext): string[] {
 			tokens.push(value);
 			continue;
 		}
-		tokens.push(f.valueFormat === 'quoted' ? `${f.define}="${value}"` : `${f.define}=${value}`);
+		tokens.push(`${f.define}${separator}${f.valueFormat === 'quoted' ? `"${value}"` : value}`);
 	}
 
 	return tokens;
@@ -335,20 +347,31 @@ function loadFlags(): FlagsFile | undefined {
 		return undefined;
 	}
 	try {
-		return parseJsonc<FlagsFile>(fs.readFileSync(file, 'utf8'));
+		return addRegionFlags(normalizeFlagIds(parseJsonc<InputFlagsFile>(fs.readFileSync(file, 'utf8'))));
 	} catch (err) {
 		vscode.window.showErrorMessage(`SS13 Build Flags: failed to parse ${file}: ${err}`);
 		return undefined;
 	}
 }
 
-// Auto-desc: fall back to a flag's ///-doc-comment above its #define in DM source.
-const DEFINE_DOC_RE = /((?:^[ \t]*\/\/\/.*\n)+)^[ \t]*(?:\/\/[ \t]*)?#define[ \t]+(\w+)/gm;
+// Auto-metadata: fill a flag's description/category from its corresponding #define in DM source.
+const DOC_COMMENT_RE = /^[ \t]*\/\/\/(.*)$/;
+const DEFINE_RE = /^[ \t]*(\/\/[ \t]*)?#define[ \t]+(\w+)(?:[ \t]+(.+?))?[ \t]*$/;
+const REGION_START_RE = /^[ \t]*\/\/[ \t]*#region[ \t]+(\S(?:.*?\S)?)[ \t]*$/;
+const REGION_END_RE = /^[ \t]*\/\/[ \t]*#endregion[ \t]*$/;
+interface DefineInfo {
+	define: string;
+	category: string;
+}
+interface DefineMetadata {
+	descriptions: Map<string, string>;
+	defines: Map<string, DefineInfo>;
+}
 
-let defineDocCache: Map<string, string> | undefined;
+let defineMetadataCache: DefineMetadata | undefined;
 let defineDocWatcher: vscode.FileSystemWatcher | undefined;
 
-/** Workspace-relative path to the single DM file scanned for /// doc comments, or undefined when unset. */
+/** Workspace-relative path to the single DM file scanned for /// doc comments and #region categories. */
 function definesDocFilePath(): string | undefined {
 	const root = workspaceRoot();
 	const rel = vscode.workspace
@@ -360,46 +383,85 @@ function definesDocFilePath(): string | undefined {
 	return path.join(root, rel);
 }
 
-/** Scans the configured DM file once and maps #define name -> its /// doc comment */
-function buildDefineDocMap(): Map<string, string> {
-	const map = new Map<string, string>();
-	const file = definesDocFilePath();
-	if (!file) {
-		return map;
-	}
-	let text: string;
-	try {
-		text = fs.readFileSync(file, 'utf8');
-	} catch {
-		return map;
-	}
-	DEFINE_DOC_RE.lastIndex = 0;
-	let m: RegExpExecArray | null;
-	while ((m = DEFINE_DOC_RE.exec(text))) {
-		const name = m[2];
-		if (map.has(name)) {
+function normalizeRegionName(name: string): string {
+	return name.replace(/^[\s-]+|[\s-]+$/g, '').trim();
+}
+
+/** Parses DM source metadata in one pass, retaining the innermost active region. */
+function parseDefineMetadata(text: string): DefineMetadata {
+	const metadata: DefineMetadata = {
+		descriptions: new Map(),
+		defines: new Map(),
+	};
+	const categoryStack: string[] = [];
+	let docLines: string[] = [];
+	for (const line of text.split(/\r?\n/)) {
+		const regionStart = line.match(REGION_START_RE);
+		if (regionStart) {
+			const category = normalizeRegionName(regionStart[1]);
+			if (!category) {
+				docLines = [];
+				continue;
+			}
+			categoryStack.push(category);
+			docLines = [];
 			continue;
 		}
-		const doc = m[1]
-			.split('\n')
-			.map((l) => l.replace(/^[ \t]*\/\/\/ ?/, '').trimEnd())
-			.filter((l) => l.length > 0)
-			.join(' ');
-		if (doc) {
-			map.set(name, doc);
+		if (REGION_END_RE.test(line)) {
+			categoryStack.pop();
+			docLines = [];
+			continue;
 		}
+		const docComment = line.match(DOC_COMMENT_RE);
+		if (docComment) {
+			docLines.push(docComment[1].replace(/^ ?/, '').trimEnd());
+			continue;
+		}
+		const define = line.match(DEFINE_RE);
+		if (define) {
+			const name = define[2];
+			const category = categoryStack[categoryStack.length - 1];
+			if (category && !metadata.defines.has(name)) {
+				metadata.defines.set(name, {
+					define: define[3]?.trim() ? `${name} ${define[3].trim()}` : name,
+					category,
+				});
+			}
+			const description = docLines.filter((part) => part.length > 0).join(' ');
+			if (description && !metadata.descriptions.has(name)) {
+				metadata.descriptions.set(name, description);
+			}
+		}
+		docLines = [];
 	}
-	return map;
+	return metadata;
 }
 
-function getDefineDocMap(): Map<string, string> {
-	if (!defineDocCache) {
-		defineDocCache = buildDefineDocMap();
+/** Reads the configured DM file for source-derived metadata. */
+function buildDefineMetadata(): DefineMetadata {
+	const empty: DefineMetadata = {
+		descriptions: new Map(),
+		defines: new Map(),
+	};
+	const file = definesDocFilePath();
+	if (!file) {
+		return empty;
 	}
-	return defineDocCache;
+	try {
+		return parseDefineMetadata(fs.readFileSync(file, 'utf8'));
+	} catch {
+		return empty;
+	}
 }
 
-/** Rebuilds the doc map next time it's needed, e.g. after the configured DM file is edited. */
+function getDefineMetadata(): DefineMetadata {
+	if (!defineMetadataCache) {
+		defineMetadataCache = buildDefineMetadata();
+	}
+	return defineMetadataCache;
+}
+
+/** Rebuilds source-derived metadata next time it's needed, e.g. after the configured DM file is edited. */
 function ensureDefineDocWatcher(context: vscode.ExtensionContext): void {
 	if (defineDocWatcher) {
 		return;
@@ -409,7 +471,7 @@ function ensureDefineDocWatcher(context: vscode.ExtensionContext): void {
 		return;
 	}
 	defineDocWatcher = vscode.workspace.createFileSystemWatcher(file);
-	const invalidate = () => { defineDocCache = undefined; };
+	const invalidate = () => { defineMetadataCache = undefined; };
 	context.subscriptions.push(
 		defineDocWatcher,
 		defineDocWatcher.onDidChange(invalidate),
@@ -418,24 +480,158 @@ function ensureDefineDocWatcher(context: vscode.ExtensionContext): void {
 	);
 }
 
-/** Extracts the bare macro name from a define token, dropping any assigned value (e.g. `NAME=1` -> `NAME`). */
+/** Extracts the bare macro name from a define token, dropping any assigned value. */
 function defineMacroName(define: string): string {
 	return define.trim().split(/[=\s]/, 1)[0];
 }
 
-/** Fills in flag.description from the DM source's doc comment where the flags file left it blank. */
-async function withAutoDescriptions(data: FlagsFile): Promise<FlagsFile> {
-	if (!data.flags.some((f) => !f.description && f.define)) {
-		return data;
+function flagDefineNames(flag: Flag): string[] {
+	const names = [defineMacroName(flag.define)];
+	if (flag.valueIsDefine) {
+		names.push(...(flag.options ?? []).map((option) => defineMacroName(option.value)).filter(Boolean));
 	}
-	const docs = getDefineDocMap();
+	return names;
+}
+function inferFlagId(flag: InputFlag): string {
+	return flag.id || (flag.define ? defineMacroName(flag.define) : slugifyFlagId(flag.label ?? ''));
+}
+
+function slugifyFlagId(value: string): string {
+	return value.trim().replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+}
+
+function inferDefine(id: string): string {
+	return id.replace(/[^A-Za-z0-9_]+/g, '_').toUpperCase();
+}
+
+/** Resolves omitted flag IDs and defines before any state or preset lookup. */
+function normalizeFlagIds(data: InputFlagsFile): FlagsFile {
 	return {
 		...data,
-		flags: data.flags.map((f) =>
-			f.description || !f.define
-				? f
-				: { ...f, description: docs.get(defineMacroName(f.define)) ?? f.description },
-		),
+		flags: data.flags.map((flag) => {
+			const id = inferFlagId(flag);
+			const define = flag.define || inferDefine(id);
+			return {
+				...flag,
+				id,
+				define,
+				label: flag.label || humanizeDefineName(defineMacroName(define)),
+			};
+		}),
+	};
+}
+function humanizeDefineName(name: string): string {
+	return name
+		.toLowerCase()
+		.split('_')
+		.map((word) => word ? word[0].toUpperCase() + word.slice(1) : word)
+		.join(' ');
+}
+
+function categoryKey(category: string): string {
+	return category.trim().toLowerCase();
+}
+
+function canonicalCategory(category: string, existing: string[] | undefined): string {
+	return existing?.find((value) => categoryKey(value) === categoryKey(category)) ?? category;
+}
+
+function mergeCategories(base: string[], additions: Array<string | undefined>): string[] {
+	const result: string[] = [];
+	const seen = new Set<string>();
+	for (const category of [...base, ...additions]) {
+		if (!category || seen.has(categoryKey(category))) {
+			continue;
+		}
+		seen.add(categoryKey(category));
+		result.push(category);
+	}
+	return result;
+}
+
+function orderRegionFlags(flags: Flag[], metadata: DefineMetadata): Flag[] {
+	if (metadata.defines.size < 2) {
+		return flags;
+	}
+	const sourceOrder = new Map([...metadata.defines.keys()].map((name, index) => [name, index]));
+	const positionsByCategory = new Map<string, number[]>();
+	for (let index = 0; index < flags.length; index++) {
+		const name = defineMacroName(flags[index].define);
+		if (!sourceOrder.has(name)) {
+			continue;
+		}
+		const category = flags[index].category ?? metadata.defines.get(name)?.category;
+		if (!category) {
+			continue;
+		}
+		const positions = positionsByCategory.get(category) ?? [];
+		positions.push(index);
+		positionsByCategory.set(category, positions);
+	}
+	if (!positionsByCategory.size) {
+		return flags;
+	}
+	const ordered = [...flags];
+	for (const positions of positionsByCategory.values()) {
+		const regionFlags = positions
+			.map((index) => ordered[index])
+			.sort((a, b) => sourceOrder.get(defineMacroName(a.define))! - sourceOrder.get(defineMacroName(b.define))!);
+		positions.forEach((index, offset) => { ordered[index] = regionFlags[offset]; });
+	}
+	return ordered;
+}
+
+/** Adds region-defined flags not explicitly listed in the JSON configuration. */
+function addRegionFlags(data: FlagsFile, metadata = getDefineMetadata()): FlagsFile {
+	const existing = new Set(data.flags.flatMap(flagDefineNames));
+	const generated: Flag[] = [];
+	for (const [name, info] of metadata.defines) {
+		if (existing.has(name)) {
+			continue;
+		}
+		const category = canonicalCategory(info.category, data.categories);
+		generated.push({
+			id: name,
+			define: info.define,
+			label: humanizeDefineName(name),
+			category,
+			description: metadata.descriptions.get(name),
+		});
+	}
+	const flags = orderRegionFlags([...data.flags, ...generated], metadata);
+	if (!generated.length && flags === data.flags) {
+		return data;
+	}
+	const categories = data.categories
+		? mergeCategories(data.categories, generated.map((flag) => flag.category))
+		: data.categories;
+	return { ...data, categories, flags };
+}
+
+/** Fills in omitted flag descriptions and categories from the configured DM source file. */
+async function withAutoMetadata(data: FlagsFile): Promise<FlagsFile> {
+	const metadata = getDefineMetadata();
+	const categories = data.flags
+		.map((f) => f.category ?? metadata.defines.get(defineMacroName(f.define))?.category)
+		.filter((category): category is string => !!category)
+		.map((category) => canonicalCategory(category, data.categories));
+	const categoryList = data.categories
+		? mergeCategories(data.categories, categories)
+		: data.categories;
+	return {
+		...data,
+		categories: categoryList,
+		flags: data.flags.map((f) => {
+			if (!f.define || (f.description && f.category)) {
+				return f;
+			}
+			const name = defineMacroName(f.define);
+			return {
+				...f,
+				description: f.description ?? metadata.descriptions.get(name),
+				category: f.category ?? canonicalCategory(metadata.defines.get(name)?.category ?? 'Uncategorized', data.categories),
+			};
+		}),
 	};
 }
 
@@ -493,13 +689,17 @@ function setEnabled(context: vscode.ExtensionContext, enabled: Record<string, bo
 }
 
 /** Overwrites localDefinesPath with #defines for the currently active flags (write-file mode). */
-function writeLocalDefines(context: vscode.ExtensionContext): void {
+function writeLocalDefines(
+	context: vscode.ExtensionContext,
+	ids = getSelected(context),
+	values = getValues(context),
+	enabled = getEnabled(context),
+): void {
 	const file = localDefinesFilePath();
 	if (!file) {
 		return;
 	}
-	const defineLines = activeDefineTokens(context).map((d) => `#define ${d}`);
-
+	const defineLines = activeDefineTokens(context, ids, values, enabled, ' ').map((d) => `#define ${d}`);
 	fs.writeFileSync(file, defineLines.length ? `${defineLines.join('\n')}\n` : '');
 }
 
@@ -509,15 +709,19 @@ function currentDefines(context: vscode.ExtensionContext): string {
 		.join(' ');
 }
 
-function updateStatusBar(context: vscode.ExtensionContext) {
+function updateStatusBar(
+	context: vscode.ExtensionContext,
+	ids = getSelected(context),
+	rawValues = getValues(context),
+	enabled = getEnabled(context),
+): void {
 	if (!flagsFilePath() || !fs.existsSync(flagsFilePath()!)) {
 		statusBar.hide();
 		return;
 	}
 	const data = loadFlags();
 	const byId = new Map(data?.flags.map((f) => [f.id, f]) ?? []);
-	const ids = getSelected(context);
-	const values = activeValues(context);
+	const values = activeValues(context, rawValues, enabled);
 	const valueLabels = Object.entries(values)
 		.map(([id, v]) => {
 			const f = byId.get(id);
@@ -569,10 +773,16 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			if (msg?.type === 'ready') {
 				this.postInit();
 			} else if (msg?.type === 'select') {
-				// Autosaves on every toggle/preset pick
-				setSelected(this.context, msg.flags ?? []);
-				setValues(this.context, msg.values ?? {});
-				setEnabled(this.context, msg.enabled ?? {});
+				const ids = msg.flags ?? [];
+				const values = msg.values ?? {};
+				const enabled = msg.enabled ?? {};
+				setSelected(this.context, ids);
+				setValues(this.context, values);
+				setEnabled(this.context, enabled);
+				if (getInjectionMode() === 'write-file') {
+					writeLocalDefines(this.context, ids, values, enabled);
+				}
+				updateStatusBar(this.context, ids, values, enabled);
 			} else if (msg?.type === 'openFile') {
 				openWorkspaceFile(msg.path, msg.line);
 			}
@@ -594,7 +804,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 			this.view.webview.html = getMissingConfigHtml();
 			return;
 		}
-		const resolved = await withAutoDescriptions(data);
+		const resolved = await withAutoMetadata(data);
 		if (!this.view) {
 			return;
 		}

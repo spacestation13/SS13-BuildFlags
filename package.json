@@ -2,7 +2,7 @@
 	"name": "ss13buildflags",
 	"displayName": "SS13 Build Flags",
 	"description": "Plugin to select build/debug flags for your SS13 Repo.",
-	"version": "1.0.1",
+	"version": "1.1.0",
 	"publisher": "ss13",
 	"repository": {
 		"type": "git",
@@ -75,7 +75,7 @@
 				"ss13BuildFlags.definesDocPath": {
 					"type": "string",
 					"default": "",
-					"markdownDescription": "Workspace-relative path to a single DM file scanned for `///` doc comments above `#define`s, used to auto-fill a flag's description when `build_flags.json` leaves it blank. Leave empty to disable auto-descriptions."
+					"markdownDescription": "Workspace-relative path to a single DM file scanned for `///` doc comments above `#define`s and `//#region Category` markers, used to auto-fill descriptions/categories when `build_flags.json` leaves them blank. Close regions with `//#endregion`. Leave empty to disable auto-metadata."
 				}
 			}
 		}
@@ -88,8 +88,8 @@
 		"publish": "npx @vscode/vsce publish"
 	},
 	"devDependencies": {
-		"@types/node": "^22.20.1",
-		"@types/vscode": "^1.85.0",
+		"@types/node": "^24.13.3",
+		"@types/vscode": "^1.102.0",
 		"@vscode/vsce": "^3.9.2",
 		"typescript": "^5.9.3"
 	},

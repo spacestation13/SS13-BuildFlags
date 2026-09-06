@@ -71,8 +71,13 @@ function renderPresets() {
 		if (p) {
 			selected = new Set(p.flags);
 			values = { ...(p.values || {}) };
-			// A preset's explicit values should take effect, not stay hidden behind a stale checkbox.
-			enabled = {};
+			// Presets activate only their explicit text values; otherwise text defaults
+			// would be treated as selected even when the preset contains only booleans.
+			enabled = Object.fromEntries(
+				DATA.flags
+					.filter((f) => f.type === 'text')
+					.map((f) => [f.id, !!values[f.id]]),
+			);
 			render();
 			save();
 		}

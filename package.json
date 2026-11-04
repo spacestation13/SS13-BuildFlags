@@ -76,6 +76,11 @@
 					"type": "string",
 					"default": "",
 					"markdownDescription": "Workspace-relative path to a single DM file scanned for `///` doc comments above `#define`s and `//#region Category` markers, used to auto-fill descriptions/categories when `build_flags.json` leaves them blank. Close regions with `//#endregion`. Leave empty to disable auto-metadata."
+				},
+				"ss13BuildFlags.reparseOnLaunch": {
+					"type": "boolean",
+					"default": 1,
+					"markdownDescription": "Whether the extension is going to ask spacemanDMM to reparse the environment upon launching. Specifically, if enabled, it will issue the `dreammaker.reparse` command."
 				}
 			}
 		}

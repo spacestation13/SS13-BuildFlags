@@ -96,6 +96,10 @@ export function activate(context: vscode.ExtensionContext) {
 		}),
 		vscode.debug.registerDebugConfigurationProvider('byond', {
 			async resolveDebugConfiguration(_folder, config) {
+				if (getReparseOnLaunch())
+				{
+					vscode.commands.executeCommand('dreammaker.reparse');
+				}
 				const baseTaskName = getBaseTaskName();
 				if (!baseTaskName || config.preLaunchTask !== baseTaskName) {
 					return config;
@@ -154,6 +158,12 @@ function getBaseTaskName(): string | undefined {
 	return vscode.workspace
 		.getConfiguration('ss13BuildFlags')
 		.get<string>('baseTask');
+}
+
+function getReparseOnLaunch(): boolean | undefined {
+	return vscode.workspace
+	.getConfiguration('ss13BuildFlags')
+	.get<boolean>('reparseOnLaunch');
 }
 
 function getInjectionMode(): 'cli-args' | 'write-file' {

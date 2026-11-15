@@ -2,7 +2,7 @@
 	"name": "ss13buildflags",
 	"displayName": "SS13 Build Flags",
 	"description": "Plugin to select build/debug flags for your SS13 Repo.",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"publisher": "ss13",
 	"repository": {
 		"type": "git",
@@ -103,7 +103,7 @@
 		"jsonc-parser": "^3.3.1"
 	},
 	"allowScripts": {
-		"@vscode/vsce-sign@2.0.9": true,
-		"keytar@7.9.0": true
+		"keytar@7.9.0": true,
+		"@vscode/vsce-sign@2.1.1": true
 	}
 }

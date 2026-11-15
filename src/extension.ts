@@ -60,7 +60,22 @@ const VIEW_ID = 'ss13BuildFlags.view';
 
 let statusBar: vscode.StatusBarItem;
 
-export function activate(context: vscode.ExtensionContext) {
+const TASK_TYPE = 'ss13buildflags';
+
+/** Fires when flags or values are changed in the UI. */
+const flagsChanged = new vscode.EventEmitter<void>();
+
+/** The exports other extensions get from this extension. */
+export interface BuildFlagsApi {
+	/** Returns the active defines as an array of `NAME` or `NAME=VALUE` strings. */
+	current(): string[];
+	/** Event that is fired when the selected flags or values change. */
+	onDidChangeFlags: vscode.Event<void>;
+	/** Returns true if the task will have flags injected into it by this extension. */
+	buildsWithFlags(preLaunchTask: unknown): boolean;
+}
+
+export function activate(context: vscode.ExtensionContext): BuildFlagsApi {
 	statusBar = vscode.window.createStatusBarItem(
 		vscode.StatusBarAlignment.Left,
 		50,
@@ -93,59 +108,43 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 			setEnabled(context, allDisabled);
 			provider.refresh();
+			flagsChanged.fire();
 		}),
-		vscode.debug.registerDebugConfigurationProvider('byond', {
-			async resolveDebugConfiguration(_folder, config) {
+		vscode.tasks.registerTaskProvider(TASK_TYPE, {
+			provideTasks: () => {
 				const baseTaskName = getBaseTaskName();
-				if (!baseTaskName || config.preLaunchTask !== baseTaskName) {
-					return config;
-				}
-				const mode = getInjectionMode();
-
-				if (mode === 'write-file') {
-					// Always write (even when nothing is selected) so a
-					// previous run's defines get cleared, not left stale.
-					writeLocalDefines(context);
-					const exitCode = await runTaskByName(baseTaskName);
-					if (exitCode === undefined) {
-						return config;
-					}
-					if (exitCode !== 0) {
-						return undefined;
-					}
-					config.preLaunchTask = undefined;
-					return config;
-				}
-
-				// cli-args mode
-				const hasValues = Object.values(getValues(context)).some((v) => v !== '');
-				if (getSelected(context).length === 0 && !hasValues) {
-					return config;
-				}
-				const tasks = await vscode.tasks.fetchTasks();
-				const baseTask = tasks.find((t) => t.name === baseTaskName);
-				if (!baseTask) {
-					vscode.window.showWarningMessage(
-						`SS13 Build Flags: could not find task "${baseTaskName}"`,
-					);
-					return config;
-				}
-				const flaggedTask = cloneTaskWithFlags(baseTask, context);
-				if (!flaggedTask) {
-					return config;
-				}
-				const execution = await vscode.tasks.executeTask(flaggedTask);
-				const exitCode = await waitForTask(execution);
-				if (exitCode !== 0) {
-					return undefined;
-				}
-				config.preLaunchTask = undefined;
-				return config;
+				return baseTaskName ? [flagInjectorTask(context, baseTaskName)] : [];
 			},
+			resolveTask: () => undefined,
 		}),
+		...['byond', 'auxtools'].map((type) =>
+			vscode.debug.registerDebugConfigurationProvider(type, {
+				resolveDebugConfiguration(_folder, config) {
+					const baseTaskName = getBaseTaskName();
+					if (baseTaskName && config.preLaunchTask === baseTaskName) {
+						config.preLaunchTask = flagInjectorTaskLabel(baseTaskName);
+					}
+					return config;
+				},
+			}),
+		),
+		flagsChanged,
 	);
 
 	updateStatusBar(context);
+
+	return {
+		current: () => activeDefineTokens(context),
+		onDidChangeFlags: flagsChanged.event,
+		buildsWithFlags: (preLaunchTask) => {
+			const baseTaskName = getBaseTaskName();
+			return (
+				!!baseTaskName &&
+				(preLaunchTask === baseTaskName ||
+					preLaunchTask === flagInjectorTaskLabel(baseTaskName))
+			);
+		},
+	};
 }
 
 export function deactivate() { }
@@ -160,20 +159,6 @@ function getInjectionMode(): 'cli-args' | 'write-file' {
 	return vscode.workspace
 		.getConfiguration('ss13BuildFlags')
 		.get<'cli-args' | 'write-file'>('injectionMode', 'cli-args');
-}
-
-/** Finds baseTaskName via fetchTasks, runs it unmodified, and awaits its exit code. */
-async function runTaskByName(baseTaskName: string): Promise<number | undefined> {
-	const tasks = await vscode.tasks.fetchTasks();
-	const baseTask = tasks.find((t) => t.name === baseTaskName);
-	if (!baseTask) {
-		vscode.window.showWarningMessage(
-			`SS13 Build Flags: could not find task "${baseTaskName}"`,
-		);
-		return undefined;
-	}
-	const execution = await vscode.tasks.executeTask(baseTask);
-	return waitForTask(execution);
 }
 
 /** 'select' and 'text' flags carry a typed-in-JSON value instead of being plain on/off toggles. */
@@ -285,15 +270,111 @@ function cloneTaskWithFlags(
 	return task;
 }
 
-function waitForTask(execution: vscode.TaskExecution): Promise<number | undefined> {
-	return new Promise((resolve) => {
-		const disposable = vscode.tasks.onDidEndTaskProcess((e) => {
-			if (e.execution === execution) {
-				disposable.dispose();
-				resolve(e.exitCode);
+/** Name of the task that injects flags into the base task. */
+function flagInjectorTaskLabel(baseTaskName: string): string {
+	return `${TASK_TYPE}: ${baseTaskName}`;
+}
+
+/** Task that runs the base task with the selected flags injected. */
+function flagInjectorTask(
+	context: vscode.ExtensionContext,
+	baseTaskName: string,
+): vscode.Task {
+	const task = new vscode.Task(
+		{ type: TASK_TYPE },
+		vscode.TaskScope.Workspace,
+		baseTaskName,
+		TASK_TYPE,
+		new vscode.CustomExecution(
+			async () => new FlagInjector(context, baseTaskName),
+		),
+	);
+	task.group = vscode.TaskGroup.Build;
+	return task;
+}
+
+/** Runs the base task with the selected flags injected. */
+class FlagInjector implements vscode.Pseudoterminal {
+	private readonly written = new vscode.EventEmitter<string>();
+	private readonly closed = new vscode.EventEmitter<number>();
+	readonly onDidWrite = this.written.event;
+	readonly onDidClose = this.closed.event;
+
+	/** Creates a flag injector for the base task. */
+	constructor(
+		private readonly context: vscode.ExtensionContext,
+		private readonly baseTaskName: string,
+	) { }
+
+	private execution?: vscode.TaskExecution;
+	private cancelled = false;
+
+	async open(): Promise<void> {
+		try {
+			const task = await this.prepareTask();
+			if (this.cancelled) {
+				return;
 			}
-		});
-	});
+			const exitCode = await this.runTask(task);
+			this.closed.fire(exitCode ?? 1);
+		} catch (error) {
+			this.written.fire(`SS13 Build Flags: ${error}\r\n`);
+			this.closed.fire(1);
+		}
+	}
+
+	/** Finds the base task and applies the selected injection mode. */
+	private async prepareTask(): Promise<vscode.Task> {
+		const tasks = await vscode.tasks.fetchTasks();
+		const baseTask = tasks.find(
+			(t) => t.name === this.baseTaskName && t.definition.type !== TASK_TYPE,
+		);
+		if (!baseTask) {
+			throw new Error(`Could not find task "${this.baseTaskName}"`);
+		}
+		let task = baseTask;
+		if (getInjectionMode() === 'write-file') {
+			// Always write (even when nothing is selected) so a
+			// previous run's defines get cleared, not left stale.
+			writeLocalDefines(this.context);
+		} else {
+			// cli-args mode
+			task = cloneTaskWithFlags(baseTask, this.context) ?? baseTask;
+		}
+		return task;
+	}
+
+	/** Runs a task and returns the exit code of its process, if it has one. */
+	private async runTask(task: vscode.Task): Promise<number | undefined> {
+		let listener: vscode.Disposable | undefined;
+		try {
+			// Resolves when the task's process has ended.
+			return await new Promise<number | undefined>((resolve, reject) => {
+				const results = new Map<vscode.TaskExecution, number | undefined>();
+				listener = vscode.tasks.onDidEndTaskProcess((e) => {
+					results.set(e.execution, e.exitCode);
+					if (e.execution === this.execution) {
+						resolve(e.exitCode);
+					}
+				});
+				// Resolves when the task has started.
+				vscode.tasks.executeTask(task).then((execution) => {
+					this.execution = execution;
+					if (this.cancelled) execution.terminate();
+					if (results.has(execution)) {
+						resolve(results.get(execution));
+					}
+				}).then(undefined, reject);
+			});
+		} finally {
+			listener?.dispose();
+		}
+	}
+
+	close(): void {
+		this.cancelled = true;
+		this.execution?.terminate();
+	}
 }
 
 ///Load some configs babyyy
@@ -783,6 +864,7 @@ class BuildFlagsViewProvider implements vscode.WebviewViewProvider {
 					writeLocalDefines(this.context, ids, values, enabled);
 				}
 				updateStatusBar(this.context, ids, values, enabled);
+				flagsChanged.fire();
 			} else if (msg?.type === 'openFile') {
 				openWorkspaceFile(msg.path, msg.line);
 			}

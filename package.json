@@ -19,6 +19,12 @@
 	],
 	"main": "./out/extension.js",
 	"contributes": {
+		"taskDefinitions": [
+			{
+				"type": "ss13buildflags",
+				"properties": {}
+			}
+		],
 		"views": {
 			"debug": [
 				{

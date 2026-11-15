@@ -12,14 +12,22 @@ A VS Code extension to add a checkbox picker for build/debug flags. The flag lis
   dropdown back to "Custom".
 - **Dependencies**: checking a flag auto-checks its `requires`;
   unchecking a requirement drops dependents; `conflictsWith` shows a warning.
-- **Injection on F5**: when the resolved launch config's `preLaunchTask`
-  matches `ss13BuildFlags.baseTask`, the extension injects the selected flags
-  and runs that task itself before launching the debugger, via one of two
+- **Injection on F5 and Restart**: when the resolved `byond` or `auxtools`
+  launch config's `preLaunchTask` matches `ss13BuildFlags.baseTask`, the
+  extension injects the selected flags via a replacement task that runs before
+  launching or restarting the debugger, via one of two
   modes (`ss13BuildFlags.injectionMode`):
   - `cli-args` (default): clones the base task with `-D${define}` appended to
     its command/args — matches DreamMaker's own CLI define syntax.
   - `write-file`: writes the selected `#define`s into
     `ss13BuildFlags.localDefinesPath`, then runs the base task unmodified.
+- **API for other extensions**: `getExtension('ss13.ss13buildflags').exports`
+  - `current()`: Returns the active defines as an array of `NAME` or
+    `NAME=VALUE` strings.
+  - `onDidChangeFlags`: Event that is fired when the selected flags or values
+    change.
+  - `buildsWithFlags(preLaunchTask)`: Returns true if the task will have flags
+    injected into it by this extension.
 
 ## Settings
 
